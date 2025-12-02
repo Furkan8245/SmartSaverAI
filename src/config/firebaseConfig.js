@@ -2,7 +2,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, setLogLevel } from 'firebase/firestore'; 
 
-// Ortam Güvenliği için Basit UUID Oluşturucu
+
 const generateUUID = () => {
     let d = new Date().getTime();
     if (typeof performance !== 'undefined' && typeof performance.now === 'function'){
@@ -16,15 +16,16 @@ const generateUUID = () => {
     return uuid;
 };
 
-// Canvas Global Değişkeni: __firebase_config
-let firebaseConfig = {};
-try {
-    const configString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
-    firebaseConfig = JSON.parse(configString);
-} catch (e) {
-    console.error("Firebase yapılandırması (JSON) ayrıştırılırken hata oluştu:", e);
-    firebaseConfig = {}; 
-}
+const firebaseConfig = {
+  apiKey: "AIzaSyAA-Uf0NkwLLFSzD8MiZGUvTnKmaMit_Zk",
+  authDomain: "smartsavurai.firebaseapp.com",
+  projectId: "smartsavurai",
+  storageBucket: "smartsavurai.firebasestorage.app",
+  messagingSenderId: "945848720788",
+  appId: "1:945848720788:web:0e9777cbdd287a62000381",
+  measurementId: "G-KYECPYLDKT"
+};
+
 
 
 // Firebase Uygulamasını Başlat
@@ -51,12 +52,12 @@ if (isConfigValid) {
 }
 
 
-// App.js'in ihtiyaç duyduğu servisleri ve fonksiyonları dışa aktar
+
 export { 
     auth, 
     db, 
     signInWithCustomToken, 
     signInAnonymously, 
     onAuthStateChanged,
-    generateUUID // Yedek ID üreticiyi dışa aktar
+    generateUUID 
 };

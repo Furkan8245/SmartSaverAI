@@ -7,13 +7,13 @@ import {
     TouchableOpacity, 
     ScrollView,
     Platform,
-    Alert // React Native Alert, window.alert yerine
+    Alert
 } from 'react-native';
 
-// Firebase Imports (React Native ortamında genellikle 'firebase/app' kullanılır)
+// Firebase Imports
 import { initializeApp, getApps, getApp } from 'firebase/app'; 
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, addDoc, doc, updateDoc, deleteDoc, onSnapshot, query } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, doc, updateDoc, deleteDoc, onSnapshot, query, orderBy } from 'firebase/firestore';
 
 // --- İKONLAR (Emoji karakterleri, <Text> içinde) ---
 const IconPlus = () => <Text style={{fontSize: 16}}>➕</Text>;
@@ -26,7 +26,6 @@ const IconAlertTriangle = () => <Text style={{fontSize: 20}}>⚠️</Text>;
 const IconX = () => <Text style={{fontSize: 20}}>❌</Text>;
 
 // === SABİT VERİLER VE KONFİGÜRASYON ===
-
 const CATEGORIES = [
     { label: 'Kategori Seçin', value: '' },
     { label: 'Gıda & Market', value: 'GidaMarket' },
@@ -37,10 +36,29 @@ const CATEGORIES = [
     { label: 'Diğer', value: 'Diger' },
 ];
 
-// Firebase Yapılandırması (Global değişkenlerden çekilir)
+// Firebase Yapılandırması okunması (global / env kontrolü)
 const firebaseConfig = (() => {
     try {
-        return typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        // 1) global değişken olarak __firebase_config (bundler veya host tarafından sağlanmış olabilir)
+        if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+            return typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+        }
+
+        // 2) Browser window (debug)
+        if (typeof window !== 'undefined' && window.__firebase_config) {
+            return typeof window.__firebase_config === 'string' ? JSON.parse(window.__firebase_config) : window.__firebase_config;
+        }
+
+        // 3) process.env (CI veya node)
+        if (typeof process !== 'undefined' && process.env && process.env.REACT_NATIVE_FIREBASE_CONFIG) {
+            try {
+                return JSON.parse(process.env.REACT_NATIVE_FIREBASE_CONFIG);
+            } catch {
+                return process.env.REACT_NATIVE_FIREBASE_CONFIG;
+            }
+        }
+
+        return {}; // no config -> mock
     } catch (e) {
         console.error("Firebase config yüklenemedi:", e);
         return {};
@@ -49,28 +67,36 @@ const firebaseConfig = (() => {
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-// Firebase servis örnekleri
+// Firebase servis örnekleri (global set edilecek)
 let authInstance = null;
 let dbInstance = null;
 
 const initializeFirebase = (config) => {
-    if (Object.keys(config).length === 0) return null;
-    if (getApps().length === 0) {
-        return initializeApp(config);
+    if (!config || Object.keys(config).length === 0) return null;
+
+    try {
+        if (getApps().length === 0) {
+            const app = initializeApp(config);
+            authInstance = getAuth(app);
+            dbInstance = getFirestore(app);
+            return app;
+        } else {
+            const app = getApp();
+            authInstance = getAuth(app);
+            dbInstance = getFirestore(app);
+            return app;
+        }
+    } catch (e) {
+        console.error('Firebase başlatılamadı:', e);
+        return null;
     }
-    return getApp(); 
 };
 
 // === YARDIMCI BİLEŞENLER ===
-
-// Kategori Seçim Bileşeni (Açılır liste simülasyonu)
 const CategorySelect = ({ value, onChange, placeholder = 'Kategori Seçin' }) => {
     const [isOpen, setIsOpen] = useState(false);
     const selectedLabel = CATEGORIES.find(c => c.value === value)?.label || placeholder;
 
-    // React Native'de Picker yerine basit bir modal veya açılır kapanır liste simülasyonu kullanırız.
-    // Şimdilik, mobil cihazlarda kullanımı kolaylaştırmak için basit bir modal/açılır kapanır görünüm kullanıyorum.
-    
     return (
         <View style={{zIndex: 10}}>
             <TouchableOpacity
@@ -78,7 +104,7 @@ const CategorySelect = ({ value, onChange, placeholder = 'Kategori Seçin' }) =>
                 onPress={() => setIsOpen(!isOpen)}
             >
                 <Text style={styles.dropdownButtonText}>{selectedLabel}</Text>
-                <IconChevronDown style={{transform: [{ rotate: isOpen ? '180deg' : '0deg' }]}} />
+                <IconChevronDown />
             </TouchableOpacity>
             
             {isOpen && (
@@ -102,7 +128,6 @@ const CategorySelect = ({ value, onChange, placeholder = 'Kategori Seçin' }) =>
     );
 };
 
-// Düzenleme Modal Bileşeni
 const EditReceiptModal = ({ isVisible, setIsVisible, currentReceipt, setCurrentReceipt, onUpdateReceipt }) => {
     if (!isVisible || !currentReceipt) return null;
     
@@ -110,12 +135,12 @@ const EditReceiptModal = ({ isVisible, setIsVisible, currentReceipt, setCurrentR
 
     const handleUpdate = () => {
         const cleanedAmount = parseFloat(currentReceipt.amount.toString().replace(/,/g, '.'));
-        
+
         if (!currentReceipt.title || !cleanedAmount || isNaN(cleanedAmount) || currentReceipt.categoryValue === '') {
             Alert.alert("Eksik Bilgi", "Lütfen tüm alanları doldurun ve geçerli bir tutar girin.");
             return;
         }
-        
+
         const updatedReceipt = {
             ...currentReceipt,
             amount: cleanedAmount,
@@ -128,12 +153,11 @@ const EditReceiptModal = ({ isVisible, setIsVisible, currentReceipt, setCurrentR
     };
 
     return (
-        // Modal görünümü (React Native'de Modal bileşeni yerine basit View simülasyonu)
         <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
                 <View style={styles.modalHeader}>
                     <Text style={styles.modalTitle}>Fiş Detaylarını Düzenle</Text>
-                    <TouchableOpacity onPress={() => setIsVisible(false)}>
+                    <TouchableOpacity onPress={() => { setIsVisible(false); setCurrentReceipt(null); }}>
                         <IconX />
                     </TouchableOpacity>
                 </View>
@@ -177,7 +201,6 @@ const EditReceiptModal = ({ isVisible, setIsVisible, currentReceipt, setCurrentR
                                 onChangeText={(text) => setCurrentReceipt({...currentReceipt, date: text})}
                                 placeholder="YYYY-MM-DD"
                             />
-                            {/* React Native'de DatePicker kullanmak daha iyidir, TextInput basit simülasyon için */}
                         </View>
                     </View>
                 </ScrollView>
@@ -191,7 +214,7 @@ const EditReceiptModal = ({ isVisible, setIsVisible, currentReceipt, setCurrentR
 
                 <TouchableOpacity
                     style={[styles.button, styles.buttonSecondary]}
-                    onPress={() => setIsVisible(false)}
+                    onPress={() => { setIsVisible(false); setCurrentReceipt(null); }}
                 >
                     <Text style={[styles.buttonText, {color: '#4B5563'}]}>İptal Et</Text>
                 </TouchableOpacity>
@@ -201,13 +224,13 @@ const EditReceiptModal = ({ isVisible, setIsVisible, currentReceipt, setCurrentR
 };
 
 // === FİREBASE SETUP VE ANA BİLEŞEN ===
-
 const App = () => {
     const [activeTab, setActiveTab] = useState('camera');
     const [receipts, setReceipts] = useState([]);
     const [globalError, setGlobalError] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
     const [userId, setUserId] = useState(null);
+    const [isMockMode, setIsMockMode] = useState(false);
 
     // Modal State
     const [isEditModalVisible, setIsEditModalVisible] = useState(false);
@@ -215,29 +238,49 @@ const App = () => {
 
     // --- FIREBASE BAŞLANGIÇ VE YETKİLENDİRME ---
     useEffect(() => {
-        const app = initializeFirebase(firebaseConfig);
-        if (!app) {
-             setGlobalError("Firebase yapılandırması eksik. Uygulama Mock modunda çalışıyor.");
-             setIsAuthReady(true);
-             setUserId('mock-user');
-             return;
+        const hasFirebaseConfig = firebaseConfig && Object.keys(firebaseConfig).length > 0;
+
+        if (!hasFirebaseConfig) {
+            // No firebase config: set mock mode
+            setIsMockMode(true);
+            setGlobalError('Firebase yapılandırması bulunamadı. Uygulama mock modunda çalışıyor. Gerçek veri için config ekleyin.');
+            setIsAuthReady(true);
+            setUserId('mock-user');
+            return;
         }
 
+        const app = initializeFirebase(firebaseConfig);
+        if (!app) {
+            setIsMockMode(true);
+            setGlobalError('Firebase başlatılamadı. Uygulama mock modunda çalışıyor. Lütfen config/bağlantınızı kontrol edin.');
+            setIsAuthReady(true);
+            setUserId('mock-user');
+            return;
+        }
+
+        // set global instances (initializeFirebase already set them but be explicit)
         authInstance = getAuth(app);
         dbInstance = getFirestore(app);
-        
-        const unsubscribe = onAuthStateChanged(authInstance, (user) => {
-            if (user) {
-                setUserId(user.uid);
-            } else {
-                setUserId(null);
-            }
-            setIsAuthReady(true); 
-        });
+
+        let unsubAuth = null;
+        try {
+            unsubAuth = onAuthStateChanged(authInstance, (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                } else {
+                    setUserId(null);
+                }
+                setIsAuthReady(true);
+            });
+        } catch (err) {
+            // ignore it; we'll set auth ready later
+            console.warn('onAuthStateChanged hatası:', err);
+            setIsAuthReady(true);
+        }
 
         const signInUser = async () => {
             const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-            
+
             try {
                 if (initialAuthToken) {
                     await signInWithCustomToken(authInstance, initialAuthToken);
@@ -246,29 +289,38 @@ const App = () => {
                 }
             } catch (error) {
                 console.error("Kimlik doğrulama hatası:", error);
-                setGlobalError(`Kritik Auth Hatası: ${error.code}. Firebase ayarlarını kontrol edin.`);
+                setGlobalError('Firebase Auth hatası. Uygulama mock moduna geçebilir.');
+                // Fallback to mock mode so UI remains usable
+                setIsMockMode(true);
                 setIsAuthReady(true);
                 setUserId('mock-user');
             }
         };
 
         signInUser();
-        
-        return () => unsubscribe(); 
+
+        return () => {
+            // cleanup auth state listener if present
+            try {
+                if (typeof unsubAuth === 'function') unsubAuth();
+            } catch {}
+        };
     }, []);
 
     // --- FIRESTORE VERİ DİNLEME (onSnapshot) ---
     useEffect(() => {
-        if (!isAuthReady || !dbInstance || !userId || userId === 'mock-user') return;
-        
+        // only listen when live firestore is available and not mock mode and user exists
+        if (!isAuthReady || isMockMode || !dbInstance || !userId || userId === 'mock-user') return;
+
         const receiptsCollectionRef = collection(dbInstance, 'artifacts', appId, 'users', userId, 'receipts');
-        const q = query(receiptsCollectionRef);
+        // orderBy date desc for consistent sorting (date should exist on docs)
+        const q = query(receiptsCollectionRef, orderBy('date', 'desc'));
 
         const unsubscribe = onSnapshot(q, (snapshot) => {
-            const fetchedReceipts = snapshot.docs.map(doc => {
-                const data = doc.data();
+            const fetchedReceipts = snapshot.docs.map(d => {
+                const data = d.data();
                 return {
-                    id: doc.id,
+                    id: d.id,
                     ...data,
                     amount: typeof data.amount === 'string' ? parseFloat(data.amount) || 0 : data.amount || 0,
                 };
@@ -280,40 +332,52 @@ const App = () => {
             setGlobalError("Veri senkronizasyonu başarısız oldu. Güvenlik kurallarınızı kontrol edin.");
         });
 
-        return () => unsubscribe(); 
-        
-    }, [isAuthReady, userId]); 
+        return () => unsubscribe();
+    }, [isAuthReady, userId, isMockMode]);
 
-    
     // --- CRUD İŞLEVLERİ (CREATE, UPDATE, DELETE) ---
     const runFirestoreOperation = useCallback(async (operation, receipt, id) => {
         if (!isAuthReady) {
-            console.error("Auth henüz hazır değil.");
+            throw new Error('Auth hazır değil');
+        }
+
+        // Mock fallback: no firebase or user is mock-user
+        if (isMockMode || userId === 'mock-user' || !dbInstance) {
+            if (!globalError || !globalError.includes('Mock')) {
+                setGlobalError('Firebase bağlantısı sağlanamadı — uygulama yerel (mock) modunda çalışıyor.');
+            }
+
+            setReceipts(prev => {
+                if (operation === 'add') {
+                    const newItem = {
+                        id: `mock-${Date.now()}`,
+                        title: receipt.title || 'Yeni Fiş',
+                        amount: Number(receipt.amount || 0),
+                        date: receipt.date || new Date().toISOString().slice(0, 10),
+                        categoryValue: receipt.categoryValue || '',
+                        category: receipt.category || CATEGORIES.find(c => c.value === (receipt.categoryValue || ''))?.label || 'Belirlenmemiş',
+                        createdAt: new Date().toISOString(),
+                        userId: 'mock-user',
+                        ...receipt
+                    };
+                    return [newItem, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                }
+                if (operation === 'update') {
+                    return prev.map(r => r.id === receipt.id ? { ...r, ...receipt, amount: Number(receipt.amount) } : r);
+                }
+                if (operation === 'delete') {
+                    return prev.filter(r => r.id !== id);
+                }
+                return prev;
+            });
             return;
         }
 
-        if (userId === 'mock-user' || !dbInstance) {
-            const baseError = "Firebase bağlantısı yok. Uygulama Mock modunda çalışıyor.";
-            if (!globalError || globalError.includes("Mock modunda")) { 
-                setGlobalError(baseError); 
-            }
-            
-            if (operation === 'add') {
-                const newReceipt = { ...receipt, id: Date.now().toString(), userId: 'mock-user' };
-                setReceipts(prev => [newReceipt, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
-            } else if (operation === 'update') {
-                setReceipts(prev => prev.map(r => r.id === receipt.id ? receipt : r));
-            } else if (operation === 'delete') {
-                setReceipts(prev => prev.filter(r => r.id !== id));
-            }
-            return;
-        }
-
+        // Real Firestore operations
         try {
             const receiptsCollectionRef = collection(dbInstance, 'artifacts', appId, 'users', userId, 'receipts');
-            
             if (operation === 'add') {
-                await addDoc(receiptsCollectionRef, { ...receipt, amount: parseFloat(receipt.amount), userId: userId });
+                await addDoc(receiptsCollectionRef, { ...receipt, amount: parseFloat(receipt.amount), userId });
             } else if (operation === 'update') {
                 const receiptDocRef = doc(dbInstance, 'artifacts', appId, 'users', userId, 'receipts', receipt.id);
                 const { id: docId, ...dataToUpdate } = receipt;
@@ -324,15 +388,16 @@ const App = () => {
             }
         } catch (e) {
             console.error(`${operation} hatası:`, e);
+            // Show friendly alert
             Alert.alert(
                 `${operation === 'add' ? 'Ekleme' : operation === 'update' ? 'Güncelleme' : 'Silme'} Başarısız`,
-                `${e.message}`
+                `${e?.message || 'Bilinmeyen hata'}`
             );
+            throw e;
         }
-    }, [isAuthReady, userId, globalError]);
+    }, [isAuthReady, userId, isMockMode, dbInstance, globalError]);
 
     const handleAddReceipt = (receipt) => runFirestoreOperation('add', receipt);
-    
     const handleEditPress = (receipt) => {
         setCurrentReceipt({
             ...receipt,
@@ -341,9 +406,7 @@ const App = () => {
         });
         setIsEditModalVisible(true);
     };
-
     const handleUpdateReceipt = (receipt) => runFirestoreOperation('update', receipt);
-    
     const handleDeleteReceipt = (id) => {
         Alert.alert(
             "Silme Onayı",
@@ -355,7 +418,6 @@ const App = () => {
             { cancelable: true }
         );
     };
-
 
     // Yükleniyor Ekranı
     if (!isAuthReady) {
@@ -378,7 +440,7 @@ const App = () => {
                     <View style={styles.errorTextContainer}>
                         <Text style={styles.errorTitle}>Uyarı!</Text>
                         <Text style={styles.errorText}>{globalError}</Text>
-                        <Text style={styles.errorTextSmall}>Anonim modda bile çalışması için Firebase Auth'un etkin olduğundan emin olun.</Text>
+                        <Text style={styles.errorTextSmall}>Anonymous modda bile çalışması için Firebase Auth'un etkin olduğundan emin olun.</Text>
                     </View>
                 </View>
             )}
@@ -415,7 +477,7 @@ const App = () => {
                 )}
             </ScrollView>
             
-             {/* Footer ve Kullanıcı ID */}
+            {/* Footer ve Kullanıcı ID */}
             <View style={styles.footer}>
                 <Text style={styles.footerText}>Kullanıcı ID: <Text style={styles.userIdText}>{userId || 'Anonim'}</Text></Text>
             </View>
@@ -444,7 +506,6 @@ const TabButton = ({ title, icon: Icon, isActive, onPress }) => (
         <Text style={[styles.tabButtonText, isActive ? styles.tabButtonTextActive : {}]}>{title}</Text>
     </TouchableOpacity>
 );
-
 
 // === EKRAN BİLEŞENLERİ ===
 
@@ -816,7 +877,7 @@ const styles = StyleSheet.create({
         fontSize: 20,
         color: 'white',
     },
-    // --- Error Banner ---
+    // Error Banner
     errorBanner: {
         flexDirection: 'row',
         padding: 12,
@@ -845,13 +906,13 @@ const styles = StyleSheet.create({
         opacity: 0.8,
         marginTop: 4,
     },
-    // --- Tabs ---
+    // Tabs
     tabBar: {
         flexDirection: 'row',
         backgroundColor: 'white',
         borderBottomWidth: 1,
         borderBottomColor: '#E5E7EB',
-        elevation: 2, // Android shadow
+        elevation: 2,
     },
     tabButton: {
         flex: 1,
@@ -877,12 +938,10 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         color: '#4F46E5',
     },
-    // --- Main Content ---
     mainContent: {
         flex: 1,
         padding: 16,
     },
-    // --- Card (Camera Screen) ---
     card: {
         backgroundColor: 'white',
         borderRadius: 12,
@@ -906,7 +965,6 @@ const styles = StyleSheet.create({
         borderBottomColor: '#E5E7EB',
         paddingBottom: 8,
     },
-    // --- Camera Section ---
     cameraSection: {
         alignItems: 'center',
         marginBottom: 24,
@@ -942,7 +1000,6 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         fontSize: 16,
     },
-    // --- Form Elements ---
     spaceY4: {
         gap: 16,
     },
@@ -969,7 +1026,6 @@ const styles = StyleSheet.create({
     flex1: {
         flex: 1,
     },
-    // --- Category Select Dropdown ---
     dropdownButton: {
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -988,7 +1044,7 @@ const styles = StyleSheet.create({
     },
     dropdownList: {
         position: 'absolute',
-        top: 50, // Yerleştirme için ayarlandı
+        top: 50,
         width: '100%',
         backgroundColor: 'white',
         borderWidth: 1,
@@ -1018,7 +1074,6 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         fontSize: 16,
     },
-    // --- Save Button ---
     saveButton: {
         width: '100%',
         marginTop: 24,
@@ -1043,7 +1098,6 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         fontSize: 16,
     },
-    // --- Footer ---
     footer: {
         padding: 8,
         backgroundColor: '#E5E7EB',
@@ -1060,7 +1114,6 @@ const styles = StyleSheet.create({
         fontSize: 11,
         color: '#1F2937',
     },
-    // --- Modal Styles ---
     modalOverlay: {
         position: 'absolute',
         top: 0,
@@ -1095,7 +1148,7 @@ const styles = StyleSheet.create({
         color: '#4F46E5',
     },
     modalBody: {
-        maxHeight: 400, // ScrollView için maksimum yükseklik
+        maxHeight: 400,
         marginBottom: 16,
     },
     button: {
@@ -1116,9 +1169,7 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         fontSize: 16,
     },
-    // --- Receipts Screen Styles ---
     screenWrapper: {
-        // maxWidth: 700, // React Native'de genellikle bu gerekli değildir
         alignSelf: 'center',
         width: '100%',
     },
@@ -1141,9 +1192,7 @@ const styles = StyleSheet.create({
         color: '#4B5563',
         marginBottom: 12,
     },
-    summaryScroll: {
-        // Yatay kaydırma için
-    },
+    summaryScroll: {},
     summaryItem: {
         padding: 16,
         borderRadius: 12,
@@ -1165,6 +1214,14 @@ const styles = StyleSheet.create({
     summaryCategory: {
         backgroundColor: 'white',
         borderTopColor: '#D1D5DB',
+    },
+    categoryTag: {
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 12,
+        alignSelf: 'flex-start',
+        marginTop: 4,
+        marginBottom: 4,
     },
     summaryTitle: {
         fontSize: 14,
@@ -1188,7 +1245,6 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         color: '#3730A3',
     },
-    // --- Search & Sort ---
     searchSortCard: {
         marginBottom: 24,
         padding: 16,
@@ -1249,7 +1305,6 @@ const styles = StyleSheet.create({
         color: 'white',
         fontSize: 14,
     },
-    // --- Receipt Item ---
     receiptItem: {
         backgroundColor: 'white',
         padding: 16,
@@ -1293,18 +1348,6 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         color: '#1F2937',
     },
-    categoryTag: {
-        paddingHorizontal: 8,
-        paddingVertical: 2,
-        borderRadius: 12,
-        alignSelf: 'flex-start',
-        marginTop: 4,
-        marginBottom: 4,
-    },
-    categoryTagText: {
-        fontSize: 10,
-        fontWeight: '600',
-    },
     receiptDate: {
         fontSize: 12,
         color: '#6B7280',
@@ -1337,7 +1380,6 @@ const styles = StyleSheet.create({
         borderRadius: 20,
         backgroundColor: '#FEE2E2',
     },
-    // --- Empty State ---
     emptyStateContainer: {
         alignItems: 'center',
         justifyContent: 'center',
