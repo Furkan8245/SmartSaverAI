@@ -2,6 +2,16 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, setLogLevel } from 'firebase/firestore'; 
 
+// --- KATEGORİLER (Common.js'in ihtiyaç duyduğu) ---
+// Bu kısım, Common.js'in CATEGORIES.find() hatasını çözmek için gereklidir.
+export const CATEGORIES = [
+    { value: 'food_market', label: 'Gıda & Market' },
+    { value: 'transport', label: 'Ulaşım' },
+    { value: 'bill_dues', label: 'Fatura & Aidat' },
+    { value: 'entertainment', label: 'Eğlence' },
+    { value: 'clothing', label: 'Giyim' },
+    { value: 'other', label: 'Diğer' },
+];
 
 const generateUUID = () => {
     let d = new Date().getTime();
@@ -26,38 +36,28 @@ const firebaseConfig = {
   measurementId: "G-KYECPYLDKT"
 };
 
+// Bu fonksiyon, App.jsx'in beklediği formatta (config, appId ve CATEGORIES ile birlikte) veri döndürür.
+export const getFirebaseConfig = () => { 
+    return { 
+        config: firebaseConfig, 
+        appId: firebaseConfig.appId, 
+        CATEGORIES: CATEGORIES 
+    };
+};
 
-
-// Firebase Uygulamasını Başlat
 let app = null;
 let auth = null;
 let db = null;
 
-const isConfigValid = Object.keys(firebaseConfig).length > 0;
-
-if (isConfigValid) {
-    try {
-        app = initializeApp(firebaseConfig);
-        auth = getAuth(app);
-        db = getFirestore(app);
-        
-        setLogLevel('debug');
-        console.log("Firebase ve Firestore başarıyla başlatıldı.");
-
-    } catch (e) {
-        console.error("Firebase Servislerini Başlatma Hatası:", e.message);
-    }
-} else {
-    console.error("HATA: Firebase yapılandırması (__firebase_config) global değişkeni boş veya hatalı. Servisler başlatılamadı.");
-}
-
-
+// Firebase'i burada başlatmıyoruz, bu sorumluluk App.jsx'e aittir. 
+// Sadece dışa aktarılacak değişkenleri tanımlıyoruz.
 
 export { 
-    auth, 
-    db, 
-    signInWithCustomToken, 
-    signInAnonymously, 
-    onAuthStateChanged,
-    generateUUID 
+    auth, 
+    db, 
+    signInWithCustomToken, 
+    signInAnonymously, 
+    onAuthStateChanged,
+    generateUUID,
+    // getFirebaseConfig zaten yukarıda export edildi
 };

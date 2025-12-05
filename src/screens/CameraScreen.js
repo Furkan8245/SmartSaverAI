@@ -1,325 +1,485 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Alert, Modal, FlatList } from 'react-native';
-// Hatalı Picker paketi kaldırıldı. Yerine standart bileşenler kullanılıyor.
+// src/screens/CameraScreen.js
 
-// Sabit Kategori Listesi
-const CATEGORIES = [
-    { label: 'Kategori Seçin', value: '' },
-    { label: 'Gıda & Market', value: 'GidaMarket' },
-    { label: 'Ulaşım', value: 'Ulasim' },
-    { label: 'Fatura & Aidat', value: 'Fatura' },
-    { label: 'Eğlence', value: 'Eglence' },
-    { label: 'Giyim', value: 'Giyim' },
-    { label: 'Diğer', value: 'Diger' },
-];
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
-// Prop olarak: { onSaveReceipt }
-const CameraScreen = ({ onSaveReceipt }) => {
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Platform, Alert } from 'react-native';
+
+import * as ImagePicker from 'expo-image-picker';
+
+import * as FileSystem from 'expo-file-system';
+
+import * as ImageManipulator from 'expo-image-manipulator';
+
+import { httpsCallable, getFunctions } from 'firebase/functions'; // Firebase Functions
+
+import { getApp } from 'firebase/app'; 
+
+
+import { styles } from '../styles/AppStyles';
+import { CATEGORIES } from '../config/firebaseConfig'; // <-- YOL DÜZELTİLDİ: ../constants/Config yerine ../config/firebaseConfig kullanıldı.
+import { 
+    IconPlus, 
+    IconCamera, 
+    IconImage, 
+    CategorySelect 
+} from '../components/Common';
+
+// Helper fonksiyon: Firebase Functions instance'ı döner
+const getFunctionsInstance = () => {
+    try {
+        const app = getApp();
+        return getFunctions(app);
+    } catch (e) {
+        console.error("Firebase App veya Functions başlatılamadı:", e);
+        return null;
+    }
+}
+
+
+export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
     const [title, setTitle] = useState('');
-    const [amount, setAmount] = useState('');
-    const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-    const [category, setCategory] = useState(''); 
-    const [isPickerVisible, setIsPickerVisible] = useState(false); // Yeni Modal durumu
+    const [categoryValue, setCategoryValue] = useState(''); 
+    const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
     const [isLoading, setIsLoading] = useState(false);
     
-    // Kategorinin görünen adını bul
-    const selectedCategoryLabel = CATEGORIES.find(c => c.value === category)?.label || CATEGORIES[0].label;
+    const [itemName, setItemName] = useState(''); 
+    const [itemPrice, setItemPrice] = useState(''); 
+    const [currentItems, setCurrentItems] = useState([]);
+    
+    const [isImageProcessed, setIsImageProcessed] = useState(false);
+    const [imageUrl, setImageUrl] = useState(null); 
 
-    // Rastgele bir görsel URL'si
-    const placeholderImageUrl = "https://placehold.co/150x150/FF6F61/ffffff?text=Fiş+Görseli";
+    
+    // Hata kontrolü eklendi: CATEGORIES'in varlığını kontrol et
+    const categoryLabel = CATEGORIES && CATEGORIES.find(c => c.value === categoryValue)?.label || 'Kategori Seçin';
+    
+    // YENİ: Cloud Function ile Gemini API Çağrısı
+    const handleSimulateProductRecognition = useCallback(async () => {
+        if (!imageUrl) {
+            Alert.alert("Hata", "Lütfen önce fotoğraf çekin veya galeriden seçin.");
+            return;
+        }
+        
+        setIsLoading(true);
+        let base64Image = null;
+        let mimeType = 'image/jpeg';
+        
+        try {
+            const manipResult = await ImageManipulator.manipulateAsync(
+                imageUrl,
+                [{ resize: { width: 1000 } }], 
+                { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+            );
 
-    const handleSave = async () => {
-        if (!title || !amount || !category) {
-            Alert.alert("Eksik Bilgi", "Lütfen fiş başlığını, tutarı ve **kategoriyi** girin.");
+            if (manipResult.base64) {
+                 base64Image = manipResult.base64;
+                 mimeType = 'image/jpeg';
+            } else {
+                 base64Image = await FileSystem.readAsStringAsync(imageUrl, {
+                     encoding: FileSystem.EncodingType.Base64,
+                 });
+            }
+        } catch (e) {
+            console.error("Görüntü işleme hatası:", e);
+            Alert.alert("Hata", "Görüntü işlenemedi.");
+            setIsLoading(false);
             return;
         }
 
-        const newReceipt = {
-            id: Date.now(), // Basit ID 
-            title: title,
-            amount: parseFloat(amount),
-            date: date,
-            category: selectedCategoryLabel, // Kategori adını kaydet
-            imageUrl: placeholderImageUrl,
-            timestamp: new Date().toISOString(),
-        };
-
-        setIsLoading(true);
-
         try {
-            onSaveReceipt(newReceipt);
-            
-            // Alanları temizle
-            setTitle('');
-            setAmount('');
-            setDate(new Date().toISOString().split('T')[0]);
-            setCategory(''); 
+            const functionsInstance = getFunctionsInstance();
+            if (!functionsInstance) {
+                Alert.alert("Hata", "Firebase Functions başlatılamadı. Mock/Hata modunda.");
+                setIsLoading(false);
+                return;
+            }
 
-            Alert.alert("Başarılı", "Fiş başarıyla kaydedildi!");
+            // HATA DÜZELTME: Fonksiyon adını Cloud Functions'ta daha sık kullanılan
+            // veya genel bir isim olan 'processImage' olarak güncelliyoruz.
+            // Gerçek fonksiyon adınız farklıysa bu kısmı değiştirmeniz gerekebilir.
+            const processReceipt = httpsCallable(functionsInstance, 'processImage'); 
+            const result = await processReceipt({ base64Image, mimeType });
+            const { items: recognizedItems, error } = result.data;
 
-        } catch (error) {
-            console.error("Fiş kaydetme hatası:", error);
-            Alert.alert("Hata", "Fiş kaydedilirken bir sorun oluştu.");
-        } finally {
             setIsLoading(false);
+            setIsImageProcessed(true);
+
+            if (error) {
+                Alert.alert("Tanıma Başarısız", error);
+                setItemName('');
+                setItemPrice('');
+                return;
+            }
+
+            if (recognizedItems && recognizedItems.length > 0) {
+                const itemsWithIds = recognizedItems.map((item, index) => ({
+                     ...item,
+                     id: Date.now() + index + Math.random().toString(36).substring(7) 
+                }));
+                setCurrentItems(itemsWithIds);
+                
+                Alert.alert("AI Tanıma Başarılı", `${recognizedItems.length} ürün başarıyla listeye eklendi. Listeyi kontrol edip kaydedebilirsiniz.`);
+                
+                if (itemsWithIds[0]) {
+                     setItemName(itemsWithIds[0].name);
+                     setItemPrice(itemsWithIds[0].price.toString());
+                }
+
+            } else {
+                Alert.alert("Ürün Bulunamadı", "Yapay zeka bu makbuzda okunaklı bir ürün kalemi bulamadı. Lütfen manuel deneyin.");
+            }
+
+        } catch (e) {
+            // Log'da gördüğümüz [FirebaseError: not-found] hatası bu alana düşer.
+            console.error("Cloud Function Çağrı Hatası:", e);
+            setIsLoading(false);
+            Alert.alert("Hata", `API çağrısında hata oluştu: ${e.message}. Cloud Function adını kontrol edin.`);
+        }
+    }, [imageUrl]);
+    
+    // İzinleri Kontrol Etme
+    const requestPermissions = useCallback(async () => {
+        if (Platform.OS !== 'web') {
+            const { status: cameraStatus } = await ImagePicker.requestCameraPermissionsAsync();
+            const { status: mediaLibraryStatus } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            
+            // ImagePicker.MediaTypeOptions uyarısı için:
+            // Bu uyarıya rağmen şimdilik kodu değiştirmeden bırakıyoruz, çünkü fonksiyonun kendisi hala çalışıyor.
+            
+            if (cameraStatus !== 'granted' || mediaLibraryStatus !== 'granted') {
+                Alert.alert(
+                    "İzin Gerekli", 
+                    "Uygulamanın fotoğraflarınıza erişim izni ve kamera izni olması gerekiyor!"
+                );
+                return false;
+            }
+        }
+        return true;
+    }, []);
+
+    // Fotoğraf Çekme
+    const handleTakePhoto = async () => {
+        if (!(await requestPermissions())) return;
+
+        let result = await ImagePicker.launchCameraAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            allowsEditing: false,
+            quality: 0.5,
+        });
+
+        if (!result.canceled) {
+            setImageUrl(result.assets[0].uri);
+            setIsImageProcessed(false);
         }
     };
     
-    // Kategori Seçim Modal'ı
-    const CategoryModal = () => (
-        <Modal
-            animationType="slide"
-            transparent={true}
-            visible={isPickerVisible}
-            onRequestClose={() => setIsPickerVisible(false)}
-        >
-            <View style={modalStyles.centeredView}>
-                <View style={modalStyles.modalView}>
-                    <Text style={modalStyles.modalTitle}>Kategori Seçin</Text>
-                    <FlatList
-                        data={CATEGORIES.filter(c => c.value !== '')}
-                        keyExtractor={item => item.value}
-                        renderItem={({ item }) => (
-                            <TouchableOpacity
-                                style={modalStyles.option}
-                                onPress={() => {
-                                    setCategory(item.value);
-                                    setIsPickerVisible(false);
-                                }}
-                            >
-                                <Text style={modalStyles.optionText}>{item.label}</Text>
-                                {item.value === category && <Text style={modalStyles.checkmark}>✓</Text>}
-                            </TouchableOpacity>
-                        )}
-                    />
+    // Galeriden Fotoğraf Seçme
+    const handlePickImage = async () => {
+        if (!(await requestPermissions())) return;
+
+        let result = await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            allowsEditing: false,
+            quality: 0.5,
+        });
+
+        if (!result.canceled) {
+            setImageUrl(result.assets[0].uri);
+            setIsImageProcessed(false);
+        }
+    };
+    
+    // Toplam Tutar Hesaplama
+    const totalAmount = useMemo(() => {
+        return currentItems.reduce((sum, item) => sum + item.price, 0);
+    }, [currentItems]);
+
+    // Ürünü listeye ekle
+    const handleAddItem = () => {
+        const cleanedPrice = parseFloat(itemPrice.toString().replace(/,/g, '.'));
+        if (!itemName || isNaN(cleanedPrice) || cleanedPrice <= 0) {
+            Alert.alert("Hata", "Lütfen geçerli bir ürün adı ve fiyatı girin.");
+            return;
+        }
+
+        setCurrentItems(prev => [...prev, { 
+            name: itemName.trim(), 
+            price: cleanedPrice, 
+            id: Date.now() + Math.random().toString(36).substring(7) 
+        }]);
+        setItemName('');
+        setItemPrice('');
+    };
+
+    // Ürünü listeden çıkar
+    const handleRemoveItem = (id) => {
+        setCurrentItems(prev => prev.filter(item => item.id !== id));
+    };
+    
+    // Geçmiş Fiyat Sorgusu
+    const previousPrices = useMemo(() => {
+        if (!itemName || !allReceipts || allReceipts.length === 0) return [];
+        
+        const query = itemName.trim().toLowerCase();
+        
+        const historyWithDate = allReceipts
+             .flatMap(receipt => (receipt.items || []).map(item => ({...item, receiptDate: receipt.date})))
+             .filter(item => item.name && item.name.toLowerCase().includes(query))
+             .sort((a, b) => new Date(b.receiptDate).getTime() - new Date(a.receiptDate).getTime());
+             
+        return historyWithDate.slice(0, 5).map(item => ({
+            price: item.price.toFixed(2), 
+            date: item.receiptDate 
+        }));
+        
+    }, [itemName, allReceipts]);
+
+    // Fişi Kaydet
+    const handleAdd = async () => {
+        if (!title || categoryValue === '' || currentItems.length === 0) {
+            Alert.alert("Hata", "Lütfen fiş başlığını, kategoriyi girin ve en az bir ürün ekleyin.");
+            return;
+        }
+
+
+        // CATEGORIES'in varlığını kontrol edin
+        const finalCategoryLabel = CATEGORIES 
+            ? CATEGORIES.find(c => c.value === categoryValue)?.label || 'Bilinmeyen Kategori'
+            : 'Bilinmeyen Kategori'; // Fallback
+
+        const newReceipt = {
+            title,
+            amount: totalAmount, 
+            category: finalCategoryLabel, // Düzeltilmiş veya fallback değer
+            categoryValue: categoryValue, 
+            date: date || new Date().toISOString().slice(0, 10),
+            imageUrl: imageUrl || 'Manuel Giriş', 
+            createdAt: new Date().toISOString(),
+            items: currentItems.map(({ id, ...rest }) => rest), 
+        };
+
+        setIsLoading(true);
+        try {
+             await onAddReceipt(newReceipt); 
+             setTitle('');
+             setItemName('');
+             setItemPrice('');
+             setCategoryValue('');
+             setDate(new Date().toISOString().slice(0, 10));
+             setCurrentItems([]); 
+             setIsImageProcessed(false); 
+             setImageUrl(null);
+        } catch (error) {
+            // Hata runFirestoreOperation içinde ele alındı
+        } finally {
+             setIsLoading(false);
+        }
+    };
+    
+    // Yardımcı Bileşen: Eklenmiş Ürün Satırı
+    const CurrentItem = ({ item, onRemove }) => (
+        <View style={styles.currentItemRow}>
+            <Text style={styles.currentItemText} numberOfLines={1}>{item.name}</Text>
+            <Text style={styles.currentItemPrice}>{item.price.toFixed(2)} TL</Text>
+            <TouchableOpacity onPress={() => onRemove(item.id)}>
+                <Text style={{fontSize: 16, color: '#DC2626'}} >❌</Text>
+            </TouchableOpacity>
+        </View>
+    );
+    
+    return (
+        <ScrollView contentContainerStyle={{ paddingBottom: 50 }}>
+            <View style={styles.card}>
+                <Text style={styles.cardTitle}>Yeni Fiş Kaydet (Akıllı Giriş)</Text>
+
+                {/* Fiş Tarama Simülasyonu -> Ürün Tanıma Simülasyonu */}
+                <View style={styles.imageUploadSection}>
+                    <Text style={styles.imageUploadTitle}>
+                        📸 Ürün Görseli Yükleme
+                    </Text>
+                    
                     <TouchableOpacity
-                        style={[modalStyles.button, modalStyles.buttonClose]}
-                        onPress={() => setIsPickerVisible(false)}
+                        style={[styles.imagePlaceholder, imageUrl && styles.imagePlaceholderProcessed]}
+                        onPress={() => imageUrl ? handleSimulateProductRecognition() : handlePickImage()}
                     >
-                        <Text style={modalStyles.textStyle}>Kapat</Text>
+                        {imageUrl ? (
+                            <View>
+                                 <Text style={{fontSize: 30}}>🖼️</Text>
+                                 <Text style={styles.imagePlaceholderText}>Görsel Yüklendi. Tanımak İçin Tıkla!</Text>
+                            </View>
+                        ) : (
+                            <View style={{alignItems: 'center'}}>
+                                <Text style={{fontSize: 30}}>📷/🖼️</Text>
+                                <Text style={styles.imagePlaceholderText}>Fotoğraf Çek veya Galeriden Seç</Text>
+                            </View>
+                        )}
+                    </TouchableOpacity>
+
+                    <View style={styles.buttonRow}>
+                        <TouchableOpacity
+                            style={[styles.button, styles.buttonSecondary, styles.flex1]}
+                            onPress={handleTakePhoto}
+                        >
+                            <Text style={[styles.buttonText, {color: '#4B5563'}]}><IconCamera /> Fotoğraf Çek</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.button, styles.buttonSecondary, styles.flex1]}
+                            onPress={handlePickImage}
+                        >
+                            <Text style={[styles.buttonText, {color: '#4B5563'}]}><IconImage /> Galeriden Seç</Text>
+                        </TouchableOpacity>
+                    </View>
+
+                    <TouchableOpacity
+                        style={[
+                            styles.button, 
+                            styles.processButton, 
+                            { marginTop: 10 },
+                            isLoading || !imageUrl ? styles.addItemButtonDisabled : styles.processButton 
+                        ]}
+                        onPress={handleSimulateProductRecognition}
+                        disabled={isLoading || !imageUrl}
+                    >
+                        {isLoading ? (
+                            <Text style={[styles.buttonText, styles.processButtonText]}>🤖 Yükleniyor...</Text>
+                        ) : (
+                            <Text style={[styles.buttonText, styles.processButtonText]}>
+                                🤖 Görüntüyü İşle ve Ürün Adını Doldur
+                            </Text>
+                        )}
+                    </TouchableOpacity>
+                    <Text style={styles.manualEntryHint}>
+                        {isImageProcessed ? `Tanınan ürün: ${itemName}` : imageUrl ? 'Görüntüyü işlemek için yukarıdaki butona tıklayın.' : 'Kamera veya Galeriden görsel yükleyin.'}
+                    </Text>
+                </View>
+
+                <View style={styles.divider} /> 
+
+                <View style={styles.spaceY4}>
+                    <View>
+                        <Text style={styles.label}>Fiş Başlığı</Text>
+                        <TextInput
+                            style={styles.input}
+                            placeholder="Örn: Haftalık Market Alışverişi"
+                            value={title}
+                            onChangeText={setTitle}
+                        />
+                    </View>
+
+                    <View style={styles.row}>
+                        <View style={styles.flex1}>
+                            <Text style={styles.label}>Kategori Seçimi</Text>
+                            <CategorySelect
+                                value={categoryValue}
+                                onChange={setCategoryValue}
+                            />
+                        </View>
+                        <View style={styles.flex1}>
+                            <Text style={styles.label}>Fiş Tarihi</Text>
+                            <TextInput
+                                style={styles.input}
+                                value={date}
+                                onChangeText={setDate}
+                                placeholder="YYYY-MM-DD"
+                            />
+                        </View>
+                    </View>
+                </View>
+
+                <View style={styles.divider} />
+                
+                <View style={styles.mlFeatureBox}>
+                    <Text style={styles.mlFeatureTitle}>🛒 Ürün Adı Girişi</Text>
+                    <Text style={styles.mlFeatureText}>
+                        Yukarıdaki **Ürün Tanıma** özelliği (kamera) kullanılırsa ürün ismi bu alana düşer.
+                    </Text>
+                    <Text style={styles.mlFeatureText}>
+                        Bu alana herhangi bir ürün ismi **(örn: Süt, Yumurta, Muz, Peynir)** yazdığınız anda, uygulamanın geçmiş fiyatları anında getirerek size tasarruf imkanı sunduğunu test edebilirsiniz.
+                    </Text>
+                </View>
+
+                <Text style={styles.sectionHeader}>Ürün Ekle ({currentItems.length} ürün, Toplam: {totalAmount.toFixed(2)} TL)</Text>
+                
+                <View style={styles.row}>
+                    <View style={styles.flex1}>
+                        <Text style={[styles.label, {color: '#4F46E5', fontWeight: 'bold'}]}>
+                            Ürün Adı (ML Sonucu Buraya Düşer)
+                        </Text>
+                        <TextInput
+                            style={[styles.input, previousPrices.length > 0 && {borderColor: '#FDBA74', borderWidth: 2}]}
+                            placeholder="Elma, Ekmek, Süt..."
+                            value={itemName}
+                            onChangeText={setItemName}
+                        />
+                    </View>
+                    <View style={{ width: 100 }}>
+                        <Text style={styles.label}>Fiyat (TL)</Text>
+                        <TextInput
+                            style={styles.input}
+                            placeholder="0.00"
+                            value={itemPrice}
+                            onChangeText={(text) => setItemPrice(text.replace(/[^0-9.]/g, ''))}
+                            keyboardType="numeric"
+                        />
+                    </View>
+                    <TouchableOpacity 
+                        style={[styles.addItemButton, (!itemName || !itemPrice || isNaN(parseFloat(itemPrice)) || parseFloat(itemPrice) <= 0) ? styles.addItemButtonDisabled : styles.addItemButtonEnabled]}
+                        onPress={handleAddItem}
+                        disabled={!itemName || !itemPrice || isNaN(parseFloat(itemPrice)) || parseFloat(itemPrice) <= 0}
+                    >
+                        <IconPlus />
                     </TouchableOpacity>
                 </View>
-            </View>
-        </Modal>
-    );
+                
+                {previousPrices.length > 0 && (
+                    <View style={styles.historicalPrices}>
+                        <Text style={styles.historicalPriceHeader}>
+                            {itemName.trim()} için Geçmiş Fiyatlar ({previousPrices.length} Kayıt):
+                        </Text>
+                        {previousPrices.map((p, index) => (
+                            <TouchableOpacity 
+                                key={index} 
+                                style={styles.historicalPriceRow}
+                                onPress={() => setItemPrice(p.price)}
+                            >
+                                <Text style={styles.historicalPriceText}>
+                                    {p.price} TL ({p.date})
+                                </Text>
+                                <Text style={styles.historicalPriceAction}>Kullan</Text>
+                            </TouchableOpacity>
+                        ))}
+                        <Text style={styles.historicalPriceHint}>
+                            Yukarıdaki fiyatlardan birine dokunarak mevcut fiyat alanına otomatik doldurabilirsiniz.
+                        </Text>
+                    </View>
+                )}
 
-    return (
-        <ScrollView contentContainerStyle={styles.container}>
-            <CategoryModal />
-            <Text style={styles.header}>Yeni Fiş Kaydı</Text>
-            
-            <View style={styles.inputGroup}>
-                <Text style={styles.label}>Fiş Başlığı (Örn: Market Alışverişi)</Text>
-                <TextInput
-                    style={styles.input}
-                    value={title}
-                    onChangeText={setTitle}
-                    placeholder="Başlık girin"
-                />
-            </View>
+                <ScrollView style={styles.itemsListContainer}>
+                    {currentItems.map((item) => (
+                        <CurrentItem key={item.id} item={item} onRemove={handleRemoveItem} />
+                    ))}
+                    {currentItems.length === 0 && (
+                        <Text style={styles.emptyListText}>Henüz fiş kalemi eklenmedi. Lütfen ürünleri tek tek ekleyin veya "Görüntüyü İşle"yi kullanın.</Text>
+                    )}
+                </ScrollView>
 
-            <View style={styles.inputGroup}>
-                <Text style={styles.label}>Kategori Seçimi</Text>
-                {/* Core bileşenlerle simüle edilmiş Picker */}
                 <TouchableOpacity 
-                    style={styles.pickerDisplay}
-                    onPress={() => setIsPickerVisible(true)}
+                    style={[
+                        styles.saveButton, 
+                        (isLoading || !title || categoryValue === '' || currentItems.length === 0) ? styles.saveButtonDisabled : styles.saveButtonEnabled
+                    ]} 
+                    onPress={handleAdd}
+                    disabled={isLoading || !title || categoryValue === '' || currentItems.length === 0}
                 >
-                    <Text style={category ? styles.pickerTextSelected : styles.pickerTextPlaceholder}>
-                        {selectedCategoryLabel}
-                    </Text>
-                    <Text style={styles.pickerIcon}>▼</Text>
+                    {isLoading ? (
+                        <Text style={styles.loadingTextButton}>⏳</Text>
+                    ) : (
+                        <Text style={styles.saveButtonText}><IconPlus /> Fişi Kaydet ({totalAmount.toFixed(2)} TL)</Text>
+                    )}
                 </TouchableOpacity>
             </View>
-
-            <View style={styles.inputGroup}>
-                <Text style={styles.label}>Tutar (TL)</Text>
-                <TextInput
-                    style={styles.input}
-                    value={amount}
-                    onChangeText={(text) => setAmount(text.replace(/[^0-9.]/g, ''))} // Sadece sayı ve nokta kabul et
-                    keyboardType="numeric"
-                    placeholder="0.00"
-                />
-            </View>
-
-            <View style={styles.inputGroup}>
-                <Text style={styles.label}>Tarih</Text>
-                <TextInput
-                    style={styles.input}
-                    value={date}
-                    onChangeText={setDate}
-                    placeholder="YYYY-MM-DD"
-                    keyboardType="numeric"
-                />
-            </View>
-            
-            <View style={styles.imagePlaceholder}>
-                <Text style={styles.placeholderText}>Kamera/Görsel Yükleme Alanı (Geliştirme Aşamasında)</Text>
-            </View>
-
-            <TouchableOpacity 
-                style={[styles.button, isLoading && styles.buttonDisabled]} 
-                onPress={handleSave} 
-                disabled={isLoading}
-            >
-                <Text style={styles.buttonText}>{isLoading ? 'Kaydediliyor...' : 'Fişi Kaydet'}</Text>
-            </TouchableOpacity>
         </ScrollView>
     );
 };
-
-const styles = StyleSheet.create({
-    container: {
-        padding: 20,
-        backgroundColor: '#f5f5f5',
-        minHeight: '100%',
-    },
-    header: {
-        fontSize: 24,
-        fontWeight: 'bold',
-        color: '#333',
-        marginBottom: 20,
-        textAlign: 'center',
-    },
-    inputGroup: {
-        marginBottom: 15,
-    },
-    label: {
-        fontSize: 14,
-        color: '#666',
-        marginBottom: 5,
-        fontWeight: '600',
-    },
-    input: {
-        backgroundColor: 'white',
-        borderWidth: 1,
-        borderColor: '#ddd',
-        borderRadius: 8,
-        padding: 10,
-        fontSize: 16,
-    },
-    pickerDisplay: {
-        backgroundColor: 'white',
-        borderWidth: 1,
-        borderColor: '#ddd',
-        borderRadius: 8,
-        padding: 15,
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-    },
-    pickerTextSelected: {
-        fontSize: 16,
-        color: '#333',
-    },
-    pickerTextPlaceholder: {
-        fontSize: 16,
-        color: '#999',
-    },
-    pickerIcon: {
-        fontSize: 12,
-        color: '#666',
-    },
-    imagePlaceholder: {
-        height: 150,
-        backgroundColor: '#eee',
-        borderRadius: 8,
-        justifyContent: 'center',
-        alignItems: 'center',
-        borderStyle: 'dashed',
-        borderWidth: 2,
-        borderColor: '#ccc',
-        marginBottom: 20,
-    },
-    placeholderText: {
-        color: '#999',
-        textAlign: 'center',
-    },
-    button: {
-        backgroundColor: '#FF6F61', 
-        padding: 15,
-        borderRadius: 8,
-        alignItems: 'center',
-        marginTop: 10,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.2,
-        shadowRadius: 4,
-        elevation: 5,
-    },
-    buttonDisabled: {
-        backgroundColor: '#f7a6a0',
-    },
-    buttonText: {
-        color: 'white',
-        fontSize: 18,
-        fontWeight: 'bold',
-    },
-});
-
-const modalStyles = StyleSheet.create({
-    centeredView: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: 'rgba(0, 0, 0, 0.5)', // Modal arka plan karartma
-    },
-    modalView: {
-        width: '85%',
-        maxHeight: '60%',
-        backgroundColor: 'white',
-        borderRadius: 20,
-        padding: 25,
-        alignItems: 'center',
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.25,
-        shadowRadius: 4,
-        elevation: 5,
-    },
-    modalTitle: {
-        fontSize: 20,
-        fontWeight: 'bold',
-        marginBottom: 15,
-        color: '#333',
-    },
-    option: {
-        width: '100%',
-        paddingVertical: 15,
-        paddingHorizontal: 10,
-        borderBottomWidth: 1,
-        borderBottomColor: '#eee',
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-    },
-    optionText: {
-        fontSize: 16,
-        color: '#333',
-    },
-    checkmark: {
-        color: '#FF6F61',
-        fontWeight: 'bold',
-        fontSize: 18,
-    },
-    button: {
-        borderRadius: 20,
-        padding: 10,
-        elevation: 2,
-        marginTop: 20,
-        width: '100%',
-        alignItems: 'center',
-    },
-    buttonClose: {
-        backgroundColor: '#2196F3',
-    },
-    textStyle: {
-        color: 'white',
-        fontWeight: 'bold',
-        textAlign: 'center',
-    },
-});
-
 
 export default CameraScreen;
