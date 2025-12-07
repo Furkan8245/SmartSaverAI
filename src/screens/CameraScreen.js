@@ -1,22 +1,14 @@
-// src/screens/CameraScreen.js
-
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Platform, Alert } from 'react-native';
-
 import * as ImagePicker from 'expo-image-picker';
-
 import * as FileSystem from 'expo-file-system';
-
 import * as ImageManipulator from 'expo-image-manipulator';
-
-import { httpsCallable, getFunctions } from 'firebase/functions'; // Firebase Functions
-
+import { httpsCallable, getFunctions, connectFunctionsEmulator } from 'firebase/functions';
 import { getApp } from 'firebase/app'; 
 
 
 import { styles } from '../styles/AppStyles';
-import { CATEGORIES } from '../config/firebaseConfig'; // <-- YOL DÜZELTİLDİ: ../constants/Config yerine ../config/firebaseConfig kullanıldı.
+import { CATEGORIES } from '../config/firebaseConfig';
 import { 
     IconPlus, 
     IconCamera, 
@@ -24,17 +16,22 @@ import {
     CategorySelect 
 } from '../components/Common';
 
-// Helper fonksiyon: Firebase Functions instance'ı döner
 const getFunctionsInstance = () => {
     try {
         const app = getApp();
-        return getFunctions(app);
+        const functions = getFunctions(app);
+        if (__DEV__) { 
+            const host = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
+            connectFunctionsEmulator(functions, host, 5001);
+            console.log(`Firebase Functions Emülatörüne bağlandı: http://${host}:5001`);
+        }
+
+        return functions;
     } catch (e) {
         console.error("Firebase App veya Functions başlatılamadı:", e);
         return null;
     }
 }
-
 
 export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
     const [title, setTitle] = useState('');
@@ -50,101 +47,86 @@ export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
     const [imageUrl, setImageUrl] = useState(null); 
 
     
-    // Hata kontrolü eklendi: CATEGORIES'in varlığını kontrol et
     const categoryLabel = CATEGORIES && CATEGORIES.find(c => c.value === categoryValue)?.label || 'Kategori Seçin';
     
-    // YENİ: Cloud Function ile Gemini API Çağrısı
-    const handleSimulateProductRecognition = useCallback(async () => {
-        if (!imageUrl) {
-            Alert.alert("Hata", "Lütfen önce fotoğraf çekin veya galeriden seçin.");
-            return;
+// YENİ: Cloud Function ile Gemini API Çağrısı
+const handleSimulateProductRecognition = useCallback(async () => {
+    if (!imageUrl) {
+        Alert.alert("Hata", "Lütfen önce fotoğraf çekin veya galeriden seçin.");
+        return;
+    }
+    
+    setIsLoading(true);
+    let base64Image = null;
+    let mimeType = 'image/jpeg';
+    
+    try {
+        // 1. Görüntüyü İşle ve Base64'e Çevir
+        const manipResult = await ImageManipulator.manipulateAsync(
+            imageUrl,
+            [{ resize: { width: 1000 } }], // Genişliği 1000px'e düşürerek sıkıştır
+            { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true } // %70 sıkıştır ve Base64 olarak al
+        );
+
+        if (!manipResult.base64) {
+            throw new Error("Görüntü Base64'e çevrilemedi.");
         }
         
-        setIsLoading(true);
-        let base64Image = null;
-        let mimeType = 'image/jpeg';
+        base64Image = manipResult.base64;
         
-        try {
-            const manipResult = await ImageManipulator.manipulateAsync(
-                imageUrl,
-                [{ resize: { width: 1000 } }], 
-                { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
-            );
-
-            if (manipResult.base64) {
-                 base64Image = manipResult.base64;
-                 mimeType = 'image/jpeg';
-            } else {
-                 base64Image = await FileSystem.readAsStringAsync(imageUrl, {
-                     encoding: FileSystem.EncodingType.Base64,
-                 });
-            }
-        } catch (e) {
-            console.error("Görüntü işleme hatası:", e);
-            Alert.alert("Hata", "Görüntü işlenemedi.");
+        // 2. Firebase Cloud Function'ı Çağır
+        const functionsInstance = getFunctionsInstance();
+        if (!functionsInstance) {
+            Alert.alert("Hata", "Firebase Functions başlatılamadı.");
             setIsLoading(false);
             return;
         }
 
-        try {
-            const functionsInstance = getFunctionsInstance();
-            if (!functionsInstance) {
-                Alert.alert("Hata", "Firebase Functions başlatılamadı. Mock/Hata modunda.");
-                setIsLoading(false);
-                return;
-            }
+        const processReceipt = httpsCallable(functionsInstance, 'processReceiptImage'); 
+        
+        const result = await processReceipt({ base64Image, mimeType });
+        const { items: recognizedItems, error } = result.data;
 
-            // HATA DÜZELTME: Fonksiyon adını Cloud Functions'ta daha sık kullanılan
-            // veya genel bir isim olan 'processImage' olarak güncelliyoruz.
-            // Gerçek fonksiyon adınız farklıysa bu kısmı değiştirmeniz gerekebilir.
-            const processReceipt = httpsCallable(functionsInstance, 'processImage'); 
-            const result = await processReceipt({ base64Image, mimeType });
-            const { items: recognizedItems, error } = result.data;
+        setIsLoading(false);
+        setIsImageProcessed(true);
 
-            setIsLoading(false);
-            setIsImageProcessed(true);
-
-            if (error) {
-                Alert.alert("Tanıma Başarısız", error);
-                setItemName('');
-                setItemPrice('');
-                return;
-            }
-
-            if (recognizedItems && recognizedItems.length > 0) {
-                const itemsWithIds = recognizedItems.map((item, index) => ({
-                     ...item,
-                     id: Date.now() + index + Math.random().toString(36).substring(7) 
-                }));
-                setCurrentItems(itemsWithIds);
-                
-                Alert.alert("AI Tanıma Başarılı", `${recognizedItems.length} ürün başarıyla listeye eklendi. Listeyi kontrol edip kaydedebilirsiniz.`);
-                
-                if (itemsWithIds[0]) {
-                     setItemName(itemsWithIds[0].name);
-                     setItemPrice(itemsWithIds[0].price.toString());
-                }
-
-            } else {
-                Alert.alert("Ürün Bulunamadı", "Yapay zeka bu makbuzda okunaklı bir ürün kalemi bulamadı. Lütfen manuel deneyin.");
-            }
-
-        } catch (e) {
-            // Log'da gördüğümüz [FirebaseError: not-found] hatası bu alana düşer.
-            console.error("Cloud Function Çağrı Hatası:", e);
-            setIsLoading(false);
-            Alert.alert("Hata", `API çağrısında hata oluştu: ${e.message}. Cloud Function adını kontrol edin.`);
+        if (error) {
+            Alert.alert("Tanıma Başarısız", error);
+            setCurrentItems([]);
+            return;
         }
-    }, [imageUrl]);
+
+        if (recognizedItems && recognizedItems.length > 0) {
+            const itemsWithIds = recognizedItems.map((item, index) => ({
+                ...item,
+                id: Date.now() + index + Math.random().toString(36).substring(2, 9) 
+            }));
+            setCurrentItems(itemsWithIds);
+            
+            Alert.alert("AI Tanıma Başarılı", `${recognizedItems.length} ürün başarıyla listeye eklendi. Listeyi kontrol edip kaydetmeyi unutmayın.`);
+            
+            if (itemsWithIds[0]) {
+                setItemName(itemsWithIds[0].name);
+                setItemPrice(itemsWithIds[0].price.toFixed(2));
+            }
+
+        } else {
+            Alert.alert("Ürün Bulunamadı", "Yapay zeka fişte okunaklı bir ürün kalemi bulamadı.");
+            setCurrentItems([]);
+        }
+
+    } catch (e) {
+        console.error("Cloud Function Çağrı Hatası:", e);
+        setIsLoading(false);
+        Alert.alert("Hata", `API çağrısında bir hata oluştu: ${e.message}. Base64 çevirme hatası veya fonksiyon zaman aşımı olabilir.`);
+    }
+}, [imageUrl]);
     
     // İzinleri Kontrol Etme
     const requestPermissions = useCallback(async () => {
         if (Platform.OS !== 'web') {
             const { status: cameraStatus } = await ImagePicker.requestCameraPermissionsAsync();
             const { status: mediaLibraryStatus } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-            
-            // ImagePicker.MediaTypeOptions uyarısı için:
-            // Bu uyarıya rağmen şimdilik kodu değiştirmeden bırakıyoruz, çünkü fonksiyonun kendisi hala çalışıyor.
             
             if (cameraStatus !== 'granted' || mediaLibraryStatus !== 'granted') {
                 Alert.alert(
@@ -172,13 +154,12 @@ export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
             setIsImageProcessed(false);
         }
     };
-    
-    // Galeriden Fotoğraf Seçme
+
     const handlePickImage = async () => {
         if (!(await requestPermissions())) return;
 
         let result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: ImagePicker.MediaType.Images,
             allowsEditing: false,
             quality: 0.5,
         });
@@ -242,15 +223,14 @@ export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
         }
 
 
-        // CATEGORIES'in varlığını kontrol edin
         const finalCategoryLabel = CATEGORIES 
             ? CATEGORIES.find(c => c.value === categoryValue)?.label || 'Bilinmeyen Kategori'
-            : 'Bilinmeyen Kategori'; // Fallback
+            : 'Bilinmeyen Kategori';
 
         const newReceipt = {
             title,
             amount: totalAmount, 
-            category: finalCategoryLabel, // Düzeltilmiş veya fallback değer
+            category: finalCategoryLabel,
             categoryValue: categoryValue, 
             date: date || new Date().toISOString().slice(0, 10),
             imageUrl: imageUrl || 'Manuel Giriş', 
@@ -260,19 +240,19 @@ export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
 
         setIsLoading(true);
         try {
-             await onAddReceipt(newReceipt); 
-             setTitle('');
-             setItemName('');
-             setItemPrice('');
-             setCategoryValue('');
-             setDate(new Date().toISOString().slice(0, 10));
-             setCurrentItems([]); 
-             setIsImageProcessed(false); 
-             setImageUrl(null);
+              await onAddReceipt(newReceipt); 
+              setTitle('');
+              setItemName('');
+              setItemPrice('');
+              setCategoryValue('');
+              setDate(new Date().toISOString().slice(0, 10));
+              setCurrentItems([]); 
+              setIsImageProcessed(false); 
+              setImageUrl(null);
         } catch (error) {
-            // Hata runFirestoreOperation içinde ele alındı
+            
         } finally {
-             setIsLoading(false);
+              setIsLoading(false);
         }
     };
     
@@ -292,7 +272,6 @@ export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
             <View style={styles.card}>
                 <Text style={styles.cardTitle}>Yeni Fiş Kaydet (Akıllı Giriş)</Text>
 
-                {/* Fiş Tarama Simülasyonu -> Ürün Tanıma Simülasyonu */}
                 <View style={styles.imageUploadSection}>
                     <Text style={styles.imageUploadTitle}>
                         📸 Ürün Görseli Yükleme
@@ -309,8 +288,8 @@ export const CameraScreen = ({ onAddReceipt, allReceipts }) => {
                             </View>
                         ) : (
                             <View style={{alignItems: 'center'}}>
-                                <Text style={{fontSize: 30}}>📷/🖼️</Text>
-                                <Text style={styles.imagePlaceholderText}>Fotoğraf Çek veya Galeriden Seç</Text>
+                                 <Text style={{fontSize: 30}}>📷/🖼️</Text>
+                                 <Text style={styles.imagePlaceholderText}>Fotoğraf Çek veya Galeriden Seç</Text>
                             </View>
                         )}
                     </TouchableOpacity>
